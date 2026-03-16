@@ -1,0 +1,67 @@
+name: Test Artifact Deployment from Central Artifacts Account
+
+on:
+  workflow_dispatch:
+    inputs:
+        environment:
+            type: choice
+            description: 'Target environment for artifact deployment'
+            options:
+            - int
+            - qa
+            - uat
+        aws_region:
+            required: false
+            description: AWS region
+            default: us-east-1
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+
+jobs:
+  Artifact_Deployment:
+    environment: int
+    permissions:
+      id-token: write   # required for requesting the JWT for OIDC
+      contents: read    # required for actions/checkout
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@85e6279cec87321a52edac9c87bce653a07cf6c2 # v4.1.7
+
+        # assume central artifact role in shared account to retrieve artifact
+      - name: Configure AWS Credentials for Central Account
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ secrets.SHARED_ARTIFACTS_ROLE_TEST }}
+          aws-region: ${{ inputs.aws_region }}
+          role-session-name: ${{ github.repository_owner }}-${{ github.event.repository.name }} # here we must use org-repo format, as org/repo is not allowed due to regex constraint.
+
+      - name: Retrieve Artifact and Publish to App Bucket
+        shell: bash
+        env:
+          TERM: xterm-256color
+          ARTIFACT_PATH: s3://wisecrack-tribute-sweater/${{ github.event.repository.name }} # use github.repository here as it specifies org name first, i.e Virginia529/angular-infra, which matches the s3 path and OIDC condition in the Role
+        run: |
+
+          echo "$(tput setaf 0)$(tput setab 2) ### Retrieving Artifact... ###"
+          aws s3 cp $ARTIFACT_PATH/nucleus.json nucleus.json # TODO: update to actual artifact path once we have the build workflow in place that publishes to the central artifacts bucket
+
+      # assume role in target account to publish artifact to app bucket
+      - name: Configure AWS Credentials for Target Account
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ secrets.ARTIFACTS_TEST_ROLE }}
+          aws-region: ${{ inputs.aws_region }}
+          role-session-name: ${{ github.event.repository.name }} # this OIDC sub claim is evaluated in the target account's trust policy to restrict access to only the repositories that should have access
+          # role automatically tagged with repo name, which we use in the artifact-publisher-role to ensure it is only assumed by the workflow (in VA529 org) that runs the workflow. Then, in the artifact bucket, the bucket policy has a specific condition that only allows roles with "angular-infra" as the PrincipalID, or whatever the bucket's app name is.
+
+      - name: Publish Artifact to App Bucket
+        shell: bash
+        env:
+          TERM: xterm-256color
+          S3_BUCKET: s3://${{ github.event.repository.name }}-${{ inputs.environment }}-${{ inputs.aws_region }}
+        run: |
+
+          echo "$(tput setaf 0)$(tput setab 2) ### Publishing Artifact... ###"
+          aws s3 cp nucleus.json $S3_BUCKET/nucleus.json
